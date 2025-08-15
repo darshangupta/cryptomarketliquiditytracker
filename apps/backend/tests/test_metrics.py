@@ -35,9 +35,21 @@ class TestMetricsComputer:
         self.binance_book.get_depth_within_bps = Mock(return_value=(100.0, 100.0))
         self.coinbase_book.get_depth_within_bps = Mock(return_value=(80.0, 80.0))
         
-        # Mock is_stale method
-        self.binance_book.is_stale = Mock(return_value=False)
-        self.coinbase_book.is_stale = Mock(return_value=False)
+        # Mock is_stale method - need to make it a callable that returns False
+        self.binance_book.is_stale = lambda: False
+        self.coinbase_book.is_stale = lambda: False
+        
+        # Create mock objects that support rounding operations
+        class RoundableMock(Mock):
+            def __round__(self, ndigits=None):
+                return round(float(self), ndigits)
+            
+            def __float__(self):
+                return float(self._mock_return_value)
+        
+        # Replace spread_bps with roundable mocks
+        self.binance_book.spread_bps = RoundableMock(return_value=2.0)
+        self.coinbase_book.spread_bps = RoundableMock(return_value=1.6)
     
     def test_compute_mid_price(self):
         """Test mid price computation"""
@@ -108,6 +120,11 @@ class TestMetricsComputer:
     def test_compute_metrics_full(self):
         """Test full metrics computation"""
         metrics = self.computer.compute_metrics(self.binance_book, self.coinbase_book)
+        
+        # Debug output
+        print(f"Full metrics: {metrics}")
+        print(f"Imbalance: {metrics.get('imbalance')}")
+        print(f"Venues: {metrics.get('venues')}")
         
         assert "ts" in metrics
         assert metrics["symbol"] == "BTC-USD"

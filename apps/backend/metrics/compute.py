@@ -28,7 +28,9 @@ class MetricsComputer:
             
             # Market structure metrics
             hhi = self._compute_hhi(venue_metrics)
+            logger.debug(f"About to compute imbalance with books: binance={binance_book}, coinbase={coinbase_book}")
             imbalance = self._compute_imbalance(binance_book, coinbase_book)
+            logger.debug(f"Imbalance result: {imbalance}")
             
             # Build metrics frame
             metrics = {
@@ -147,7 +149,7 @@ class MetricsComputer:
         """Compute metrics for a single venue"""
         try:
             # Check if venue is stale
-            is_stale = order_book.is_stale if hasattr(order_book, 'is_stale') else False
+            is_stale = order_book.is_stale() if hasattr(order_book, 'is_stale') and callable(order_book.is_stale) else False
             
             # Basic metrics
             spread_bps = order_book.spread_bps
@@ -229,6 +231,7 @@ class MetricsComputer:
         try:
             mid_price = self._compute_mid_price(binance_book, coinbase_book)
             if not mid_price:
+                logger.debug("No mid price available for imbalance calculation")
                 return None
             
             total_bid_depth = 0.0
@@ -239,19 +242,26 @@ class MetricsComputer:
                 bid_depth, ask_depth = binance_book.get_depth_within_bps(self.window_bps)
                 total_bid_depth += bid_depth
                 total_ask_depth += ask_depth
+                logger.debug(f"Binance depth: bid={bid_depth}, ask={ask_depth}")
             
             # Add Coinbase depth
             if coinbase_book:
                 bid_depth, ask_depth = coinbase_book.get_depth_within_bps(self.window_bps)
                 total_bid_depth += bid_depth
                 total_ask_depth += ask_depth
+                logger.debug(f"Coinbase depth: bid={bid_depth}, ask={ask_depth}")
             
             # Compute imbalance
             total_depth = total_bid_depth + total_ask_depth
+            logger.debug(f"Total depth: bid={total_bid_depth}, ask={total_ask_depth}, total={total_depth}")
+            
             if total_depth > 0:
                 imbalance = (total_bid_depth - total_ask_depth) / total_depth
-                return max(-1.0, min(1.0, imbalance))  # Clamp to [-1, 1]
+                result = max(-1.0, min(1.0, imbalance))  # Clamp to [-1, 1]
+                logger.debug(f"Computed imbalance: {imbalance} -> {result}")
+                return result
             else:
+                logger.debug("Total depth is 0, returning 0.0")
                 return 0.0
                 
         except Exception as e:
