@@ -1,0 +1,45 @@
+## Rules v2 — Runtime Sleep Tolerance & Data Orchestration
+
+### Runtime Sleep Tolerance
+- The backend **may be asleep** on first load (free-tier hosting).  
+- The frontend must **always show data immediately** and **upgrade gracefully** to backend live data when available.
+
+### Data Orchestrator
+- On app start:
+  1. Attempt **backend WebSocket** connection for up to **2000 ms**.
+  2. If no data, spin up **client-side exchange WS ingestors** (Binance + Coinbase public feeds).
+  3. Compute metrics in-browser using **shared formulas**:
+    - Mid price
+    - Spread (bps)
+    - Depth ±0.5%
+    - Shares
+    - HHI
+    - Imbalance
+    - Latency estimate
+  4. When backend status becomes `"live"`, tear down client ingestors and switch to backend frames **seamlessly**.
+
+### Cache & Replay
+- Seed charts from **local cache** (last ~10 min, IndexedDB or localStorage) on first paint.
+- If cache is empty, render a **bundled 30–60s demo JSON** with a `"replay"` watermark until live data arrives.
+- Update cache on every tick (backend or client mode).
+
+### Backend Status Semantics
+- Broadcast frames with `"status":"warming"` until both venues have fresh books (<1s old), then `"status":"live"`.
+- `/api/execute` returns:
+  - `503 {"reason":"warming"}` if `status != "live"`
+  - Runs SOR if `status == "live"`
+
+### UX Indicators
+- **Status chip**:
+  - `"Live: Backend"` (green)
+  - `"Live: Local compute"` (blue)
+  - `"Warming up…"` (amber)
+- Venue badges show `stale` if no updates >3s.
+- Smooth source switching (≤500 ms fade) with x-axis continuity.
+
+### Quality & Heartbeats
+- Keep frame size `< 2 KB` (round decimals).
+- Backend sends heartbeat every **5s**; frontend drops to client mode if 2 heartbeats missed.
+- Unit test:
+  - Orchestrator switching logic
+  - Metric parity between TS (frontend) and Py (backend) within tolerance.

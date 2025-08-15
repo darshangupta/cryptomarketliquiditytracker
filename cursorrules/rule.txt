@@ -1,0 +1,213 @@
+You are the tech lead for a real-time, multi-venue liquidity analytics platform.
+Generate production-lean, cost-free code that can ship in a day, with a path to V1.5.
+
+=====================
+PRODUCT SUMMARY
+=====================
+Build a web app that:
+1) Ingests BTC-USD order books from Binance and Coinbase (extensible to more).
+2) Computes at 2–4 Hz: mid, spread (bps), depth within ±0.5%, venue shares, HHI, imbalance, venue latency.
+3) Streams compact metric frames to the browser via a backend WebSocket.
+4) Provides /api/execute to run a fee-aware Smart Order Router (SOR) vs naive single-venue baseline.
+5) (Optional V1.5) Persists 1-second aggregates to DuckDB/Parquet and serves /api/replay.
+
+Primary goals: minimal cost, clarity, correctness, clean separation of concerns, and recruiter-friendly polish.
+
+=====================
+STACK & HOSTING
+=====================
+- Frontend: Next.js 14 (App Router, TypeScript), Tailwind, shadcn/ui, Recharts.
+- Backend: Python 3.11, FastAPI, uvicorn, asyncio, websockets.
+- DB: None for V1; (Optional V1.5) DuckDB + Parquet (embedded, no server).
+- Hosting: Vercel (frontend), Fly.io or Railway (backend). Browser connects directly to backend WS.
+- NO external message brokers or managed DBs in V1.
+
+=====================
+API & PROTOCOLS
+=====================
+WebSocket (server → browser), route: /ws/stream?symbol=BTC-USD&window=050bps
+Frame (<= 2KB, rounded decimals):
+{
+  "ts": "<ISO8601>",
+  "symbol": "BTC-USD",
+  "window_bps": 50,
+  "mid": number,
+  "hhi": number,
+  "imbalance": number,
+  "venues": [
+    {"venue":"binance","spread_bps": number,"share": number,"latency_ms": number,"stale": boolean},
+    {"venue":"coinbase","spread_bps": number,"share": number,"latency_ms": number,"stale": boolean}
+  ]
+}
+
+REST:
+- POST /api/execute
+  Request: { "symbol":"BTC-USD", "side":"buy"|"sell", "notional_usd": number, "fee_bps": { "binance": number, "coinbase": number } }
+  Response:
+  {
+    "ts":"<ISO8601>",
+    "symbol":"BTC-USD",
+    "side":"buy",
+    "notional":100000,
+    "mid_t0": number,
+    "naive": {"venue":"coinbase","vwap": number,"slippage_bps": number,"fills":[{"venue":"coinbase","px": number,"qty": number}]},
+    "sor":   {"vwap": number,"slippage_bps": number,"fills":[{"venue":"binance","px": number,"qty": number}, {"venue":"coinbase","px": number,"qty": number}]},
+    "slippage_saved_bps": number
+  }
+
+(Optional V1.5)
+- GET /api/replay?from=<unix>&to=<unix>
+  Response: { "points": [ { "t": <unix>, "hhi": number, "spread_bps": number, "binance_share": number, "coinbase_share": number, "latency_binance": number, "latency_coinbase": number } ] }
+
+=====================
+ALGORITHMS & METRICS
+=====================
+- mid = (best_bid + best_ask) / 2
+- spread_bps = 10_000 * (best_ask - best_bid) / mid
+- depth_050: sum notional inside [mid*(1-0.005), mid] for bids + [mid, mid*(1+0.005)] for asks
+- share_venue = venue_depth_050 / total_depth_050  (if total_depth_050 == 0, shares = 0)
+- HHI = sum(share_venue^2) across venues
+- imbalance = (bid_depth_050 - ask_depth_050) / max(1e-9, (bid_depth_050 + ask_depth_050))
+- latency_ms: now - last server ts (if available) else now - last recv time
+- Venue “stale” if no update > 3s; when stale, share=0 and indicate stale=true.
+
+SOR (fee-aware, price-time):
+- Merge cross-venue asks (for buy) or bids (for sell), best price first.
+- For each level: apply fee_bps as effective price (buy: px*(1+fee), sell: px*(1-fee)).
+- Sweep until notional filled; compute VWAP and slippage_bps vs mid_t0.
+- Naive baseline: run the same on a single venue (choose best-touch venue or accept a “venue” parameter).
+- Return per-venue fills [{venue, px, qty}] and computed metrics.
+
+=====================
+QUALITY BARS & RULES
+=====================
+- Strong typing: TypeScript types on frontend; Pydantic models on backend.
+- Keep WS payloads compact: round price 2–4 dp, sizes 6 dp, shares 3 dp, bps 1 dp.
+- Resilience: async WS reconnect/backoff to exchanges; mark venue stale if >3s.
+- Time: all timestamps in UTC ISO8601; server keeps a monotonic clock for diffs.
+- Security: never expose backend secrets to client; front end reads `NEXT_PUBLIC_BACKEND_URL`.
+- Testing: unit tests for HHI, depth window, and SOR slippage math; minimal e2e WS connect + parse frame.
+- Linting: ESLint + Prettier (web), mypy + ruff/black (backend).
+- Docs: README with setup, env examples, screenshots, and a “Why execution quality & HHI matter” section.
+
+=====================
+REPO LAYOUT (MONOREPO)
+=====================
+/apps
+  /web       # Next.js + shadcn/ui (Vercel)
+    app/dashboard/page.tsx         # Main dashboard
+    app/api/execute/route.ts       # (Proxy or direct call to backend, optional)
+    components/ui/*                # shadcn
+    components/charts/*            # Recharts components
+    lib/ws.ts                      # WS client with reconnect + jitter
+    lib/api.ts                     # REST helpers (execute, replay)
+    lib/types.ts                   # Shared TS types
+    lib/format.ts                  # number/time format helpers
+    styles/tailwind.css
+    env.example
+  /backend   # FastAPI (Fly/Railway)
+    main.py                        # FastAPI app, WS endpoint, REST routes
+    ingest/binance.py              # WS adapter -> normalized book
+    ingest/coinbase.py
+    ingest/normalize.py            # common schema, top-N levels
+    metrics/compute.py             # mid/spread/depth/share/HHI/imbalance/latency
+    metrics/sor.py                 # fee-aware routing + naive baseline
+    state/buffers.py               # in-memory ring buffers
+    storage/duck.py                # (V1.5) DuckDB/Parquet writer & queries
+    config.py                      # env, constants
+    tests/test_metrics.py
+    tests/test_sor.py
+    Dockerfile
+    fly.toml
+    env.example
+/README.md
+
+=====================
+FRONTEND REQUIREMENTS
+=====================
+UI (shadcn/ui):
+- Overview: Tabs for symbols (start with BTC-USD).
+- Cards: current mid, spread(bps), HHI, venue status badges (stale/ok).
+- Charts:
+  - Stacked area: venue shares over time (live + replay overlay)
+  - Lines: HHI, spread(bps), latency(ms) per venue
+  - (Stretch) Depth heatmap (consolidated)
+- Execution Simulator:
+  - Inputs: side (buy/sell), notional, fee sliders per venue
+  - Results: VWAPs, slippage_bps, slippage_saved_bps, fills table
+
+Data:
+- Live: WebSocket frames drive charts/state (ring buffer in memory on client).
+- Replay: On mount, fetch last 10 min via /api/replay (if V1.5 enabled) and seed charts.
+- Error UX: toast + reconnect when WS drops; badge venues as stale.
+
+=====================
+BACKEND REQUIREMENTS
+=====================
+- Start two asyncio tasks for exchange WS adapters; normalize to a shared model:
+  {
+    "ts": "<ISO8601>",
+    "venue": "binance|coinbase",
+    "symbol": "BTC-USD",
+    "bids": [[price:number, size:number], ... up to N],
+    "asks": [[price:number, size:number], ... up to N],
+    "server_ts": "<ISO8601|null>"
+  }
+- Compute metrics at a fixed tick (e.g., every 500ms): mid, spread_bps, depth_050, shares, HHI, imbalance, latency.
+- Broadcast a compact frame to all WS subscribers (per symbol/window channel).
+- /api/execute: read latest consolidated book from memory; run naive + SOR; return JSON.
+- (V1.5) Every second, append 1s rollups to DuckDB/Parquet; /api/replay queries DuckDB.
+
+=====================
+CONFIGURATION & ENV
+=====================
+- apps/web: NEXT_PUBLIC_BACKEND_URL, NEXT_PUBLIC_DEFAULT_SYMBOL
+- apps/backend: EXCHANGES (binance, coinbase), SYMBOLS (BTC-USD), TICK_HZ (2–4), TOP_LEVELS (e.g., 50)
+- Optional: DUCKDB_PATH, PARQUET_DIR
+- Sensible defaults if env not provided.
+
+=====================
+DEVELOPMENT TASKS (GENERATE CODE)
+=====================
+1) Backend
+   - Implement WS adapters (binance, coinbase) with reconnect/backoff and normalization.
+   - Implement metrics.compute: mid, spread_bps, depth_050, shares, HHI, imbalance, latency.
+   - Implement metrics.sor: fee-aware sweep + naive baseline; pure functions, unit-tested.
+   - Implement WS server (/ws/stream) with per-channel hub; heartbeat every 5s; client cleanup.
+   - Implement /api/execute.
+   - (V1.5) Implement DuckDB writer (1s rollups) and /api/replay.
+
+2) Frontend
+   - Scaffold Next.js + Tailwind + shadcn/ui; base layout and Dashboard page.
+   - Implement lib/ws.ts (auto-reconnect, backoff, jitter, onmessage parser, type-checked).
+   - Build cards + charts (shares stacked area; lines for HHI/spread/latency).
+   - Build Execution Simulator panel with fee sliders and results table.
+   - Add loading/empty/error states; “venue stale” badges.
+
+3) Testing & Linting
+   - pytest for HHI/depth window/SOR math.
+   - minimal e2e test: WS connect + first frame parse (can be mocked).
+   - ESLint/Prettier config; mypy/ruff on backend.
+
+4) Docs
+   - README: setup steps, env examples, run scripts, screenshots, architecture diagram (ASCII ok),
+     and “Why execution quality + HHI matter” section.
+
+=====================
+ACCEPTANCE CRITERIA
+=====================
+- Backend runs and connects to Binance + Coinbase; WS stream emits frames at configured rate.
+- Frontend displays live shares, HHI, and spread within 2s of load; updates smoothly.
+- /api/execute returns SOR vs naive for any notional up to $1M within 300ms.
+- If one venue drops, frames continue with stale=true for that venue and shares re-normalized.
+- (If V1.5 enabled) /api/replay returns last 10 minutes, charts render replay + live overlay.
+
+=====================
+NON-GOALS / OUT OF SCOPE
+=====================
+- No Kafka/Redis, no managed DBs in V1.
+- No auth/multi-tenant; single-user demo is fine.
+- No equities real-time ingestion (crypto only for live).
+- Keep payloads under 2 KB; avoid over-detailing L2 levels in WS frames.
+
+Generate code with clear file paths and working minimal implementations. Prefer correctness and simplicity over abstractions. Explain any assumptions you make.
