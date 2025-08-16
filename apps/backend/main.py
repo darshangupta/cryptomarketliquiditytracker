@@ -10,8 +10,8 @@ import websockets
 
 from config import Config
 from ingest.binance import BinanceAdapter
-from ingest.coinbase import CoinbaseAdapter
-from ingest.normalize import OrderBook, NormalizedBook
+from ingest.kraken import KrakenAdapter
+from ingest.normalize import OrderBook
 from metrics.compute import MetricsComputer
 from metrics.sor import SmartOrderRouter
 from state.buffers import OrderBookBuffer
@@ -40,11 +40,11 @@ class AppState:
         self.sor_router = SmartOrderRouter()
         self.status = "warming"
         self.last_heartbeat = datetime.now(timezone.utc)
-        self.venue_status = {"binance": False, "coinbase": False}
+        self.venue_status = {"binance": False, "kraken": False}
         
         # Exchange adapters
         self.binance_adapter = BinanceAdapter()
-        self.coinbase_adapter = CoinbaseAdapter()
+        self.kraken_adapter = KrakenAdapter()
         
         # Background tasks
         self.ingestion_task: Optional[asyncio.Task] = None
@@ -94,7 +94,7 @@ async def run_exchange_ingestion():
         # Start both exchange adapters concurrently
         await asyncio.gather(
             app_state.binance_adapter.run(),
-            app_state.coinbase_adapter.run()
+            app_state.kraken_adapter.run()
         )
     except Exception as e:
         logger.error(f"Exchange ingestion failed: {e}")
@@ -107,25 +107,25 @@ async def run_metrics_computation():
             
             # Get latest order books
             binance_book = app_state.binance_adapter.get_latest_book()
-            coinbase_book = app_state.coinbase_adapter.get_latest_book()
+            kraken_book = app_state.kraken_adapter.get_latest_book()
             
-            if binance_book and coinbase_book:
+            if binance_book and kraken_book:
                 # Update venue status
                 app_state.venue_status["binance"] = True
-                app_state.venue_status["coinance"] = True
+                app_state.venue_status["kraken"] = True
                 
                 # Check if we should transition to "live" status
                 if app_state.status == "warming":
                     binance_age = (datetime.now(timezone.utc) - binance_book.timestamp).total_seconds()
-                    coinbase_age = (datetime.now(timezone.utc) - coinbase_book.timestamp).total_seconds()
+                    kraken_age = (datetime.now(timezone.utc) - kraken_book.timestamp).total_seconds()
                     
-                    if binance_age < 1.0 and coinbase_age < 1.0:
+                    if binance_age < 1.0 and kraken_age < 1.0:
                         app_state.status = "live"
                         logger.info("Status changed to LIVE")
                 
                 # Compute metrics
                 metrics = app_state.metrics_computer.compute_metrics(
-                    binance_book, coinbase_book
+                    binance_book, kraken_book
                 )
                 
                 # Add status to metrics
@@ -237,9 +237,9 @@ async def execute_order(request: dict):
         
         # Get latest order books
         binance_book = app_state.binance_adapter.get_latest_book()
-        coinbase_book = app_state.coinbase_adapter.get_latest_book()
+        kraken_book = app_state.kraken_adapter.get_latest_book()
         
-        if not (binance_book and coinbase_book):
+        if not (binance_book and kraken_book):
             raise HTTPException(status_code=503, detail="Order books not available")
         
         # Execute SOR
@@ -248,7 +248,7 @@ async def execute_order(request: dict):
             notional_usd=notional_usd,
             fee_bps=fee_bps,
             binance_book=binance_book,
-            coinbase_book=coinbase_book
+            coinbase_book=kraken_book
         )
         
         return result

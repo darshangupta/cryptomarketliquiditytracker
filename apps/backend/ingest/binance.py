@@ -83,10 +83,16 @@ class BinanceAdapter:
     async def _listen(self):
         """Listen for messages from Binance WebSocket"""
         try:
+            logger.info("🎧 Binance: Starting to listen for messages...")
+            message_count = 0
+            
             async for message in self.websocket:
                 if not self._running:
                     break
-                    
+                
+                message_count += 1
+                logger.info(f"📨 Binance: Received message #{message_count}: {message[:200]}...")
+                
                 await self._handle_message(message)
                 
         except ConnectionClosed:
@@ -103,6 +109,7 @@ class BinanceAdapter:
         """Process incoming message from Binance"""
         try:
             data = json.loads(message)
+            logger.debug(f"Received Binance message: {data}")
             
             # Handle different message types
             if "e" in data:  # Event type
@@ -114,6 +121,8 @@ class BinanceAdapter:
                     await self._handle_depth_snapshot(data)
                 else:
                     logger.debug(f"Unhandled Binance event: {event_type}")
+            else:
+                logger.debug(f"Binance message without event type: {data}")
             
         except json.JSONDecodeError as e:
             logger.warning(f"Failed to parse Binance message: {e}")

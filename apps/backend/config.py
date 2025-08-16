@@ -5,7 +5,7 @@ class Config:
     """Application configuration"""
     
     # Exchange settings
-    EXCHANGES = os.getenv("EXCHANGES", "binance,coinbase").split(",")
+    EXCHANGES = os.getenv("EXCHANGES", "binance,kraken").split(",")
     SYMBOLS = os.getenv("SYMBOLS", "BTC-USD").split(",")
     
     # Performance settings
@@ -25,7 +25,7 @@ class Config:
     
     # Exchange WebSocket URLs (public feeds, no auth required)
     BINANCE_WS_URL = "wss://stream.binance.com:9443/ws/btcusdt@depth20@100ms"
-    COINBASE_WS_URL = "wss://ws-feed.exchange.coinbase.com"
+    KRAKEN_WS_URL = "wss://ws.kraken.com"
     
     # API settings
     API_HOST = os.getenv("API_HOST", "0.0.0.0")

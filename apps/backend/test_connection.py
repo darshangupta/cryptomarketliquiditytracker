@@ -13,7 +13,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from ingest.binance import BinanceAdapter
-from ingest.coinbase import CoinbaseAdapter
+from ingest.kraken import KrakenAdapter
 from config import Config
 
 # Configure logging
@@ -58,11 +58,11 @@ async def test_binance_connection():
     
     return True
 
-async def test_coinbase_connection():
-    """Test Coinbase WebSocket connection"""
-    logger.info("Testing Coinbase connection...")
+async def test_kraken_connection():
+    """Test Kraken WebSocket connection"""
+    logger.info("Testing Kraken connection...")
     
-    adapter = CoinbaseAdapter()
+    adapter = KrakenAdapter()
     
     try:
         # Start the adapter
@@ -74,21 +74,21 @@ async def test_coinbase_connection():
         # Check if we received data
         latest_book = adapter.get_latest_book()
         if latest_book:
-            logger.info(f"✅ Coinbase connection successful!")
+            logger.info(f"✅ Kraken connection successful!")
             logger.info(f"   Symbol: {latest_book.symbol}")
             logger.info(f"   Best bid: {latest_book.best_bid}")
             logger.info(f"   Best ask: {latest_book.best_ask}")
             logger.info(f"   Mid price: {latest_book.mid_price}")
             logger.info(f"   Spread: {latest_book.spread_bps} bps")
         else:
-            logger.warning("⚠️  Coinbase connected but no data received")
+            logger.warning("⚠️  Kraken connected but no data received")
         
         # Stop the adapter
         await adapter.stop()
         task.cancel()
         
     except Exception as e:
-        logger.error(f"❌ Coinbase connection failed: {e}")
+        logger.error(f"❌ Kraken connection failed: {e}")
         return False
     
     return True
@@ -99,7 +99,7 @@ async def main():
     logger.info(f"   TICK_HZ: {Config.TICK_HZ}")
     logger.info(f"   DEPTH_WINDOW_BPS: {Config.DEPTH_WINDOW_BPS}")
     logger.info(f"   BINANCE_WS_URL: {Config.BINANCE_WS_URL}")
-    logger.info(f"   COINBASE_WS_URL: {Config.COINBASE_WS_URL}")
+    logger.info(f"   KRAKEN_WS_URL: {Config.KRAKEN_WS_URL}")
     logger.info("")
     
     # Test Binance
@@ -107,13 +107,13 @@ async def main():
     
     logger.info("")
     
-    # Test Coinbase
-    coinbase_success = await test_coinbase_connection()
+    # Test Kraken
+    kraken_success = await test_kraken_connection()
     
     logger.info("")
     
     # Summary
-    if binance_success and coinbase_success:
+    if binance_success and kraken_success:
         logger.info("🎉 All exchange connections successful! Backend is ready to run.")
         return True
     else:
