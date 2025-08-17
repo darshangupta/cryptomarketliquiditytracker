@@ -183,48 +183,7 @@ class OrderBookNormalizer:
             logger.error(f"Failed to normalize Coinbase data: {e}")
             raise
     
-    @staticmethod
-    def normalize_kraken(data: dict, venue: str = "kraken") -> OrderBook:
-        """Normalize Kraken order book data"""
-        try:
-            # Extract order book data
-            symbol = "XBT-USD"  # Kraken uses XBT for Bitcoin
-            
-            # Kraken doesn't provide server timestamp in order book updates
-            timestamp = datetime.now(timezone.utc)
-            
-            # Parse bids and asks
-            bids = []
-            asks = []
-            
-            if "b" in data:  # bids
-                for bid_data in data["b"]:
-                    if isinstance(bid_data, list) and len(bid_data) >= 2:
-                        price = float(bid_data[0])
-                        size = float(bid_data[1])
-                        if price > 0 and size > 0:
-                            bids.append(OrderBookLevel(price, size))
-            
-            if "a" in data:  # asks
-                for ask_data in data["a"]:
-                    if isinstance(ask_data, list) and len(ask_data) >= 2:
-                        price = float(ask_data[0])
-                        size = float(ask_data[1])
-                        if price > 0 and size > 0:
-                            asks.append(OrderBookLevel(price, size))
-            
-            return OrderBook(
-                venue=venue,
-                symbol=symbol,
-                timestamp=timestamp,
-                server_timestamp=None,  # Kraken doesn't provide this
-                bids=bids,
-                asks=asks
-            )
-            
-        except Exception as e:
-            logger.error(f"Failed to normalize Kraken data: {e}")
-            raise
+
     
     @staticmethod
     def is_stale(order_book: OrderBook, threshold_seconds: float = 3.0) -> bool:

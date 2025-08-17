@@ -50,8 +50,22 @@ class OrderBookBuffer:
     def __init__(self, max_size: int = 1000):
         self.max_size = max_size
         self.binance_buffer = RingBuffer[OrderBook](max_size)
-        self.coinbase_buffer = RingBuffer[OrderBook](max_size)
+        self.kraken_buffer = RingBuffer[OrderBook](max_size)
         self.metrics_buffer = RingBuffer[dict](max_size)
+    
+    def add_order_book(self, order_book: OrderBook) -> None:
+        """Add order book to appropriate buffer based on venue"""
+        try:
+            if order_book.venue == "binance":
+                self.binance_buffer.add(order_book)
+                logger.debug(f"Added Binance order book to buffer. Buffer size: {self.binance_buffer.size()}")
+            elif order_book.venue == "kraken":
+                self.kraken_buffer.add(order_book)
+                logger.debug(f"Added Kraken order book to buffer. Buffer size: {self.kraken_buffer.size()}")
+            else:
+                logger.warning(f"Unknown venue: {order_book.venue}")
+        except Exception as e:
+            logger.error(f"Failed to add order book to buffer: {e}")
     
     def add_binance_book(self, order_book: OrderBook) -> None:
         """Add Binance order book to buffer"""
@@ -61,13 +75,13 @@ class OrderBookBuffer:
         except Exception as e:
             logger.error(f"Failed to add Binance order book to buffer: {e}")
     
-    def add_coinbase_book(self, order_book: OrderBook) -> None:
-        """Add Coinbase order book to buffer"""
+    def add_kraken_book(self, order_book: OrderBook) -> None:
+        """Add Kraken order book to buffer"""
         try:
-            self.coinbase_buffer.add(order_book)
-            logger.debug(f"Added Coinbase order book to buffer. Buffer size: {self.coinbase_buffer.size()}")
+            self.kraken_buffer.add(order_book)
+            logger.debug(f"Added Kraken order book to buffer. Buffer size: {self.kraken_buffer.size()}")
         except Exception as e:
-            logger.error(f"Failed to add Coinbase order book to buffer: {e}")
+            logger.error(f"Failed to add Kraken order book to buffer: {e}")
     
     def add_metrics(self, metrics: dict) -> None:
         """Add computed metrics to buffer"""
@@ -81,9 +95,9 @@ class OrderBookBuffer:
         """Get most recent Binance order book"""
         return self.binance_buffer.get_latest()
     
-    def get_latest_coinbase_book(self) -> Optional[OrderBook]:
-        """Get most recent Coinbase order book"""
-        return self.coinbase_buffer.get_latest()
+    def get_latest_kraken_book(self) -> Optional[OrderBook]:
+        """Get most recent Kraken order book"""
+        return self.kraken_buffer.get_latest()
     
     def get_latest_metrics(self) -> Optional[dict]:
         """Get most recent metrics"""
@@ -116,7 +130,7 @@ class OrderBookBuffer:
     def get_venue_status(self) -> dict:
         """Get current status of both venues"""
         binance_book = self.get_latest_binance_book()
-        coinbase_book = self.get_latest_coinbase_book()
+        kraken_book = self.get_latest_kraken_book()
         
         return {
             "binance": {
@@ -124,10 +138,10 @@ class OrderBookBuffer:
                 "is_stale": binance_book.is_stale() if binance_book else True,
                 "last_update": binance_book.timestamp.isoformat() if binance_book else None
             },
-            "coinbase": {
-                "has_data": coinbase_book is not None,
-                "is_stale": coinbase_book.is_stale() if coinbase_book else True,
-                "last_update": coinbase_book.timestamp.isoformat() if coinbase_book else None
+            "kraken": {
+                "has_data": kraken_book is not None,
+                "is_stale": kraken_book.is_stale() if kraken_book else True,
+                "last_update": kraken_book.timestamp.isoformat() if kraken_book else None
             }
         }
     
@@ -135,17 +149,17 @@ class OrderBookBuffer:
         """Get statistics about buffer usage"""
         return {
             "binance_buffer_size": self.binance_buffer.size(),
-            "coinbase_buffer_size": self.coinbase_buffer.size(),
+            "kraken_buffer_size": self.kraken_buffer.size(),
             "metrics_buffer_size": self.metrics_buffer.size(),
             "max_size": self.max_size,
             "binance_buffer_full": self.binance_buffer.is_full(),
-            "coinbase_buffer_full": self.coinbase_buffer.is_full(),
+            "kraken_buffer_full": self.kraken_buffer.is_full(),
             "metrics_buffer_full": self.metrics_buffer.is_full()
         }
     
     def clear_all(self) -> None:
         """Clear all buffers"""
         self.binance_buffer.clear()
-        self.coinbase_buffer.clear()
+        self.kraken_buffer.clear()
         self.metrics_buffer.clear()
         logger.info("All buffers cleared")

@@ -14,13 +14,13 @@ logger = logging.getLogger(__name__)
 class BinanceAdapter:
     """Binance WebSocket adapter for order book data"""
     
-    def __init__(self):
+    def __init__(self, on_book_update: Optional[Callable[[OrderBook], None]] = None):
         self.ws_url = Config.BINANCE_WS_URL
         self.websocket: Optional[websockets.WebSocketServerProtocol] = None
         self.is_connected = False
         self.reconnect_attempts = 0
         self.latest_book: Optional[OrderBook] = None
-        self.on_book_update: Optional[Callable[[OrderBook], None]] = None
+        self.on_book_update = on_book_update
         
         # Connection state
         self._running = False
@@ -87,23 +87,22 @@ class BinanceAdapter:
             message_count = 0
             
             async for message in self.websocket:
-                if not self._running:
-                    break
-                
                 message_count += 1
                 logger.info(f"📨 Binance: Received message #{message_count}: {message[:200]}...")
                 
                 await self._handle_message(message)
                 
         except ConnectionClosed:
-            logger.warning("Binance WebSocket connection closed")
+            logger.warning("⚠️ Binance WebSocket connection closed")
             self.is_connected = False
         except WebSocketException as e:
-            logger.error(f"Binance WebSocket error: {e}")
+            logger.error(f"❌ Binance WebSocket error: {e}")
             self.is_connected = False
         except Exception as e:
-            logger.error(f"Unexpected error in Binance listener: {e}")
+            logger.error(f"❌ Unexpected error in Binance listener: {e}")
             self.is_connected = False
+        finally:
+            logger.info("Binance adapter cancelled")
     
     async def _handle_message(self, message: str):
         """Process incoming message from Binance"""
@@ -114,6 +113,7 @@ class BinanceAdapter:
             # Handle different message types
             if "e" in data:  # Event type
                 event_type = data["e"]
+                logger.info(f"🔍 Binance event type: {event_type}")
                 
                 if event_type == "depthUpdate":
                     await self._handle_depth_update(data)
@@ -122,7 +122,9 @@ class BinanceAdapter:
                 else:
                     logger.debug(f"Unhandled Binance event: {event_type}")
             else:
-                logger.debug(f"Binance message without event type: {data}")
+                # This might be a depth snapshot (no event type)
+                logger.info(f"📊 Binance message without event type - treating as depth snapshot: {list(data.keys())}")
+                await self._handle_depth_snapshot(data)
             
         except json.JSONDecodeError as e:
             logger.warning(f"Failed to parse Binance message: {e}")
@@ -132,6 +134,8 @@ class BinanceAdapter:
     async def _handle_depth_update(self, data: dict):
         """Handle order book depth update"""
         try:
+            logger.info(f"🔄 Processing Binance depth update: {list(data.keys())}")
+            
             # Create order book from update
             order_book = OrderBookNormalizer.normalize_binance(data, "binance")
             
@@ -142,14 +146,17 @@ class BinanceAdapter:
             if self.on_book_update:
                 self.on_book_update(order_book)
                 
-            logger.debug(f"Binance depth update: {order_book.symbol} bid={order_book.best_bid} ask={order_book.best_ask}")
+            logger.info(f"✅ Binance depth update processed: {order_book.symbol} bid={order_book.best_bid} ask={order_book.best_ask}")
             
         except Exception as e:
-            logger.error(f"Failed to handle Binance depth update: {e}")
+            logger.error(f"❌ Failed to handle Binance depth update: {e}")
+            logger.error(f"   Data: {data}")
     
     async def _handle_depth_snapshot(self, data: dict):
         """Handle order book depth snapshot"""
         try:
+            logger.info(f"🔄 Processing Binance depth snapshot: {list(data.keys())}")
+            
             # Create order book from snapshot
             order_book = OrderBookNormalizer.normalize_binance(data, "binance")
             
@@ -160,10 +167,11 @@ class BinanceAdapter:
             if self.on_book_update:
                 self.on_book_update(order_book)
                 
-            logger.info(f"Binance depth snapshot: {order_book.symbol} bid={order_book.best_bid} ask={order_book.best_ask}")
+            logger.info(f"✅ Binance depth snapshot processed: {order_book.symbol} bid={order_book.best_bid} ask={order_book.best_ask}")
             
         except Exception as e:
-            logger.error(f"Failed to handle Binance depth snapshot: {e}")
+            logger.error(f"❌ Failed to handle Binance depth snapshot: {e}")
+            logger.error(f"   Data: {data}")
     
     async def _handle_reconnect(self):
         """Handle reconnection with exponential backoff"""
@@ -204,3 +212,41 @@ class BinanceAdapter:
         
         self.is_connected = False
         logger.info("Binance adapter stopped")
+
+    async def connect(self):
+        """Connect to Binance WebSocket"""
+        try:
+            logger.info(f"Connecting to Binance WebSocket: {self.ws_url}")
+            
+            self.websocket = await websockets.connect(
+                self.ws_url,
+                ping_interval=30,
+                ping_timeout=10,
+                close_timeout=10
+            )
+            
+            self.is_connected = True
+            self.reconnect_attempts = 0
+            logger.info("✅ Binance WebSocket connected")
+            
+            # Start listening
+            await self._listen()
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to connect to Binance: {e}")
+            self.is_connected = False
+            raise
+    
+    async def disconnect(self):
+        """Disconnect from Binance WebSocket"""
+        self._running = False
+        if self.websocket:
+            await self.websocket.close()
+            logger.info("🔌 Binance WebSocket disconnected")
+    
+    async def __aenter__(self):
+        await self.connect()
+        return self
+    
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.disconnect()

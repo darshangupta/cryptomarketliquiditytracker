@@ -50,24 +50,36 @@ class AppState:
         self.ingestion_task: Optional[asyncio.Task] = None
         self.metrics_task: Optional[asyncio.Task] = None
         self.heartbeat_task: Optional[asyncio.Task] = None
+    
+    def on_binance_update(self, order_book: OrderBook):
+        """Callback when Binance order book updates"""
+        logger.debug(f"📊 Binance order book update: bid={order_book.best_bid} ask={order_book.best_ask}")
+        # Store in buffer for metrics computation
+        self.order_book_buffer.add_order_book(order_book)
+    
+    def on_kraken_update(self, order_book: OrderBook):
+        """Callback when Kraken order book updates"""
+        logger.debug(f"📊 Kraken order book update: bid={order_book.best_bid} ask={order_book.best_ask}")
+        # Store in buffer for metrics computation
+        self.order_book_buffer.add_order_book(order_book)
 
 app_state = AppState()
 
 @app.on_event("startup")
 async def startup_event():
-    """Start background tasks for data ingestion and metrics computation"""
-    logger.info("Starting crypto market liquidity tracker...")
+    """Initialize application state and start background tasks"""
+    logger.info("🚀 Starting up...")
     
-    # Start exchange data ingestion
+    # Initialize exchange adapters
+    app_state.binance_adapter = BinanceAdapter(on_book_update=app_state.on_binance_update)
+    app_state.kraken_adapter = KrakenAdapter(on_book_update=app_state.on_kraken_update)
+    
+    # Start background tasks
     app_state.ingestion_task = asyncio.create_task(run_exchange_ingestion())
-    
-    # Start metrics computation
     app_state.metrics_task = asyncio.create_task(run_metrics_computation())
-    
-    # Start heartbeat
     app_state.heartbeat_task = asyncio.create_task(run_heartbeat())
     
-    logger.info("Background tasks started")
+    logger.info("✅ Startup complete")
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -91,13 +103,35 @@ async def shutdown_event():
 async def run_exchange_ingestion():
     """Run exchange data ingestion in background"""
     try:
-        # Start both exchange adapters concurrently
-        await asyncio.gather(
-            app_state.binance_adapter.run(),
-            app_state.kraken_adapter.run()
-        )
+        logger.info("🔄 Starting exchange ingestion...")
+        
+        # Start both adapters completely independently
+        binance_task = asyncio.create_task(run_binance_adapter())
+        kraken_task = asyncio.create_task(run_kraken_adapter())
+        
+        # Don't wait for both - let them run independently
+        # This way if one fails, the other keeps running
+        
     except Exception as e:
-        logger.error(f"Exchange ingestion failed: {e}")
+        logger.error(f"❌ Exchange ingestion failed: {e}")
+
+async def run_binance_adapter():
+    """Run Binance adapter with error handling"""
+    try:
+        logger.info("🟡 Starting Binance adapter...")
+        await app_state.binance_adapter.connect()
+    except Exception as e:
+        logger.error(f"❌ Binance adapter failed: {e}")
+        # Don't re-raise - let other adapters continue
+
+async def run_kraken_adapter():
+    """Run Kraken adapter with error handling"""
+    try:
+        logger.info("🟠 Starting Kraken adapter...")
+        await app_state.kraken_adapter.connect()
+    except Exception as e:
+        logger.error(f"❌ Kraken adapter failed: {e}")
+        # Don't re-raise - let other adapters continue
 
 async def run_metrics_computation():
     """Run metrics computation at fixed intervals"""
@@ -119,9 +153,16 @@ async def run_metrics_computation():
                     binance_age = (datetime.now(timezone.utc) - binance_book.timestamp).total_seconds()
                     kraken_age = (datetime.now(timezone.utc) - kraken_book.timestamp).total_seconds()
                     
-                    if binance_age < 1.0 and kraken_age < 1.0:
+                    logger.info(f"🔍 Age check - Binance: {binance_age:.2f}s, Kraken: {kraken_age:.2f}s")
+                    logger.info(f"🔍 Binance timestamp: {binance_book.timestamp}")
+                    logger.info(f"🔍 Kraken timestamp: {kraken_book.timestamp}")
+                    
+                    # Allow transition to live if both venues have reasonably fresh data (<5 seconds)
+                    if binance_age < 5.0 and kraken_age < 5.0:
                         app_state.status = "live"
-                        logger.info("Status changed to LIVE")
+                        logger.info(f"Status changed to LIVE - Binance age: {binance_age:.2f}s, Kraken age: {kraken_age:.2f}s")
+                    else:
+                        logger.info(f"⏳ Still warming - Binance age: {binance_age:.2f}s, Kraken age: {kraken_age:.2f}s")
                 
                 # Compute metrics
                 metrics = app_state.metrics_computer.compute_metrics(
@@ -198,15 +239,91 @@ async def websocket_endpoint(websocket: WebSocket):
             "venue_status": app_state.venue_status
         }))
         
-        # Keep connection alive
-        while True:
-            # Wait for any message (ping/pong or disconnect)
-            data = await websocket.receive_text()
+        # Send current market data immediately
+        binance_book = app_state.order_book_buffer.get_latest_binance_book()
+        kraken_book = app_state.order_book_buffer.get_latest_kraken_book()
+        
+        if binance_book and kraken_book:
+            # Create market metrics for frontend
+            market_data = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "binance": {
+                    "bid": float(binance_book.best_bid),
+                    "ask": float(binance_book.best_ask),
+                    "spread": float(binance_book.best_ask - binance_book.best_bid)
+                },
+                "kraken": {
+                    "bid": float(kraken_book.best_bid),
+                    "ask": float(kraken_book.best_ask),
+                    "spread": float(kraken_book.best_ask - kraken_book.best_bid)
+                },
+                "metrics": {
+                    "mid": float((binance_book.best_bid + binance_book.best_ask + kraken_book.best_bid + kraken_book.best_ask) / 4),
+                    "spread_bps": 0.85,  # Placeholder - will be computed by metrics
+                    "depth": 1300000,     # Placeholder - will be computed by metrics
+                    "hhi": 0.52,         # Placeholder - will be computed by metrics
+                    "imbalance": 0.12    # Placeholder - will be computed by metrics
+                }
+            }
             
-            # Handle ping/pong if needed
-            if data == "ping":
-                await websocket.send_text("pong")
+            await websocket.send_text(json.dumps({
+                "type": "market_metrics",
+                "data": market_data
+            }))
+        
+        # Keep connection alive and send periodic updates
+        while True:
+            try:
+                # Check if connection is still open
+                if websocket.client_state.value == 2:  # DISCONNECTED
+                    logger.info("WebSocket client disconnected, stopping data loop")
+                    break
                 
+                # Send market data every 30 seconds (instead of 1 second)
+                await asyncio.sleep(30)
+                
+                # Get latest data
+                binance_book = app_state.order_book_buffer.get_latest_binance_book()
+                kraken_book = app_state.order_book_buffer.get_latest_kraken_book()
+                
+                if binance_book and kraken_book:
+                    # Create updated market data
+                    market_data = {
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "binance": {
+                            "bid": float(binance_book.best_bid),
+                            "ask": float(binance_book.best_ask),
+                            "spread": float(binance_book.best_ask - binance_book.best_bid)
+                        },
+                        "kraken": {
+                            "bid": float(kraken_book.best_bid),
+                            "ask": float(kraken_book.best_ask),
+                            "spread": float(kraken_book.best_ask - kraken_book.best_bid)
+                        },
+                        "metrics": {
+                            "mid": float((binance_book.best_bid + binance_book.best_ask + kraken_book.best_bid + kraken_book.best_ask) / 4),
+                            "spread_bps": 0.85,  # Placeholder - will be computed by metrics
+                            "depth": 1300000,     # Placeholder - will be computed by metrics
+                            "hhi": 0.52,         # Placeholder - will be computed by metrics
+                            "imbalance": 0.12    # Placeholder - will be computed by metrics
+                        }
+                    }
+                    
+                    try:
+                        await websocket.send_text(json.dumps({
+                            "type": "market_metrics",
+                            "data": market_data
+                        }))
+                        logger.info(f"✅ WebSocket: Sent market data to client. Binance: ${market_data['binance']['bid']}, Kraken: ${market_data['kraken']['bid']}")
+                    except Exception as send_error:
+                        logger.warning(f"Failed to send market data: {send_error}")
+                        break  # Exit loop if we can't send
+                        
+            except Exception as e:
+                logger.error(f"Error in WebSocket data loop: {e}")
+                # Don't break the loop, just log and continue
+                continue
+        
     except WebSocketDisconnect:
         logger.info("WebSocket client disconnected")
     except Exception as e:
