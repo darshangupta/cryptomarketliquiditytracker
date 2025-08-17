@@ -224,113 +224,140 @@ async def broadcast_frame(frame: dict):
 
 @app.websocket("/ws/stream")
 async def websocket_endpoint(websocket: WebSocket):
-    """WebSocket endpoint for real-time market data streaming"""
     await websocket.accept()
-    app_state.websocket_connections.add(websocket)
-    
-    logger.info(f"WebSocket client connected. Total clients: {len(app_state.websocket_connections)}")
+    logger.info("🔌 New WebSocket client connected")
     
     try:
-        # Send initial status
+        # Send initial connection status
         await websocket.send_text(json.dumps({
-            "ts": datetime.now(timezone.utc).isoformat(),
             "type": "connection_status",
-            "status": app_state.status,
-            "venue_status": app_state.venue_status
+            "data": {
+                "status": "connected",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "message": "WebSocket connection established"
+            }
         }))
         
-        # Send current market data immediately
-        binance_book = app_state.order_book_buffer.get_latest_binance_book()
-        kraken_book = app_state.order_book_buffer.get_latest_kraken_book()
-        
-        if binance_book and kraken_book:
-            # Create market metrics for frontend
-            market_data = {
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "binance": {
-                    "bid": float(binance_book.best_bid),
-                    "ask": float(binance_book.best_ask),
-                    "spread": float(binance_book.best_ask - binance_book.best_bid)
-                },
-                "kraken": {
-                    "bid": float(kraken_book.best_bid),
-                    "ask": float(kraken_book.best_ask),
-                    "spread": float(kraken_book.best_ask - kraken_book.best_bid)
-                },
-                "metrics": {
-                    "mid": float((binance_book.best_bid + binance_book.best_ask + kraken_book.best_bid + kraken_book.best_ask) / 4),
-                    "spread_bps": 0.85,  # Placeholder - will be computed by metrics
-                    "depth": 1300000,     # Placeholder - will be computed by metrics
-                    "hhi": 0.52,         # Placeholder - will be computed by metrics
-                    "imbalance": 0.12    # Placeholder - will be computed by metrics
-                }
-            }
-            
-            await websocket.send_text(json.dumps({
-                "type": "market_metrics",
-                "data": market_data
-            }))
-        
-        # Keep connection alive and send periodic updates
+        # Stream live market data
         while True:
             try:
-                # Check if connection is still open
-                if websocket.client_state.value == 2:  # DISCONNECTED
-                    logger.info("WebSocket client disconnected, stopping data loop")
-                    break
-                
-                # Send market data every 30 seconds (instead of 1 second)
-                await asyncio.sleep(30)
-                
-                # Get latest data
+                # Get latest order books
                 binance_book = app_state.order_book_buffer.get_latest_binance_book()
                 kraken_book = app_state.order_book_buffer.get_latest_kraken_book()
                 
                 if binance_book and kraken_book:
-                    # Create updated market data
-                    market_data = {
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
-                        "binance": {
-                            "bid": float(binance_book.best_bid),
-                            "ask": float(binance_book.best_ask),
-                            "spread": float(binance_book.best_ask - binance_book.best_bid)
-                        },
-                        "kraken": {
-                            "bid": float(kraken_book.best_bid),
-                            "ask": float(kraken_book.best_ask),
-                            "spread": float(kraken_book.best_ask - kraken_book.best_bid)
-                        },
-                        "metrics": {
-                            "mid": float((binance_book.best_bid + binance_book.best_ask + kraken_book.best_bid + kraken_book.best_ask) / 4),
-                            "spread_bps": 0.85,  # Placeholder - will be computed by metrics
-                            "depth": 1300000,     # Placeholder - will be computed by metrics
-                            "hhi": 0.52,         # Placeholder - will be computed by metrics
-                            "imbalance": 0.12    # Placeholder - will be computed by metrics
-                        }
-                    }
+                    # Analyze order book depth
+                    binance_depth = binance_book.analyze_depth()
+                    kraken_depth = kraken_book.analyze_depth()
                     
-                    try:
-                        await websocket.send_text(json.dumps({
-                            "type": "market_metrics",
-                            "data": market_data
-                        }))
-                        logger.info(f"✅ WebSocket: Sent market data to client. Binance: ${market_data['binance']['bid']}, Kraken: ${market_data['kraken']['bid']}")
-                    except Exception as send_error:
-                        logger.warning(f"Failed to send market data: {send_error}")
-                        break  # Exit loop if we can't send
+                    # Get top levels for display
+                    binance_top_bids, binance_top_asks = binance_book.get_top_levels(20)
+                    kraken_top_bids, kraken_top_asks = kraken_book.get_top_levels(20)
+                    
+                    # Calculate market impact for different trade sizes
+                    trade_sizes = [0.1, 0.5, 1.0, 2.0, 5.0, 10.0]
+                    binance_impact = {}
+                    kraken_impact = {}
+                    
+                    for size in trade_sizes:
+                        # Binance impact
+                        buy_price, buy_impact = binance_depth.get_market_impact(size, "buy")
+                        sell_price, sell_impact = binance_depth.get_market_impact(size, "sell")
+                        binance_impact[str(size)] = {
+                            "buy": {"price": buy_price, "impact_bps": buy_impact * 100},
+                            "sell": {"price": sell_price, "impact_bps": sell_impact * 100}
+                        }
                         
+                        # Kraken impact
+                        buy_price, buy_impact = kraken_depth.get_market_impact(size, "buy")
+                        sell_price, sell_impact = kraken_depth.get_market_impact(size, "sell")
+                        kraken_impact[str(size)] = {
+                            "buy": {"price": buy_price, "impact_bps": buy_impact * 100},
+                            "sell": {"price": sell_price, "impact_bps": sell_impact * 100}
+                        }
+                    
+                    # Get optimal trade sizes
+                    binance_optimal = binance_depth.get_optimal_trade_size(10.0)  # 10 bps max impact
+                    kraken_optimal = kraken_depth.get_optimal_trade_size(10.0)
+                    
+                    # Calculate liquidity scores
+                    binance_liquidity = binance_book.calculate_liquidity_score(50.0)  # ±50 bps window
+                    kraken_liquidity = kraken_book.calculate_liquidity_score(50.0)
+                    
+                    # Send comprehensive market data
+                    await websocket.send_text(json.dumps({
+                        "type": "market_metrics",
+                        "data": {
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "binance": {
+                                "bid": binance_book.best_bid,
+                                "ask": binance_book.best_ask,
+                                "spread": binance_book.best_ask - binance_book.best_bid if binance_book.best_bid and binance_book.best_ask else 0,
+                                "mid_price": binance_book.mid_price,
+                                "spread_bps": binance_book.spread_bps,
+                                "depth": binance_depth.total_bid_depth + binance_depth.total_ask_depth,
+                                "liquidity_score": binance_liquidity,
+                                "optimal_trade_size": binance_optimal[0],
+                                "optimal_impact_bps": binance_optimal[1],
+                                "top_bids": [{"price": level.price, "size": level.size} for level in binance_top_bids],
+                                "top_asks": [{"price": level.price, "size": level.size} for level in binance_top_asks],
+                                "market_impact": binance_impact
+                            },
+                            "kraken": {
+                                "bid": kraken_book.best_bid,
+                                "ask": kraken_book.best_ask,
+                                "spread": kraken_book.best_ask - kraken_book.best_bid if kraken_book.best_bid and kraken_book.best_ask else 0,
+                                "mid_price": kraken_book.mid_price,
+                                "spread_bps": kraken_book.spread_bps,
+                                "depth": kraken_depth.total_bid_depth + kraken_depth.total_ask_depth,
+                                "liquidity_score": kraken_liquidity,
+                                "optimal_trade_size": kraken_optimal[0],
+                                "optimal_impact_bps": kraken_optimal[1],
+                                "top_bids": [{"price": level.price, "size": level.size} for level in kraken_top_bids],
+                                "top_asks": [{"price": level.price, "size": level.size} for level in kraken_top_asks],
+                                "market_impact": kraken_impact
+                            },
+                            "metrics": {
+                                "mid": (binance_book.mid_price + kraken_book.mid_price) / 2 if binance_book.mid_price and kraken_book.mid_price else 0,
+                                "spread_bps": (binance_book.spread_bps + kraken_book.spread_bps) / 2 if binance_book.spread_bps and kraken_book.spread_bps else 0,
+                                "depth": (binance_depth.total_bid_depth + binance_depth.total_ask_depth + kraken_depth.total_bid_depth + kraken_depth.total_ask_depth),
+                                "hhi": app_state.metrics_computer.compute_metrics(binance_book, kraken_book).get("hhi", 0),
+                                "imbalance": app_state.metrics_computer.compute_metrics(binance_book, kraken_book).get("imbalance", 0),
+                                "total_liquidity_score": binance_liquidity + kraken_liquidity
+                            }
+                        }
+                    }))
+                    
+                    logger.info("📊 Sent comprehensive market data via WebSocket")
+                
+                # Wait before next update
+                await asyncio.sleep(30)
+                
             except Exception as e:
-                logger.error(f"Error in WebSocket data loop: {e}")
-                # Don't break the loop, just log and continue
-                continue
-        
+                logger.error(f"❌ Error in WebSocket data streaming: {e}")
+                await websocket.send_text(json.dumps({
+                    "type": "error",
+                    "data": {
+                        "message": f"Error processing market data: {str(e)}",
+                        "timestamp": datetime.now(timezone.utc).isoformat()
+                    }
+                }))
+                break
+                
     except WebSocketDisconnect:
-        logger.info("WebSocket client disconnected")
+        logger.info("🔌 WebSocket client disconnected")
     except Exception as e:
-        logger.error(f"WebSocket error: {e}")
-    finally:
-        app_state.websocket_connections.discard(websocket)
-        logger.info(f"WebSocket client removed. Total clients: {len(app_state.websocket_connections)}")
+        logger.error(f"❌ WebSocket error: {e}")
+        try:
+            await websocket.send_text(json.dumps({
+                "type": "error",
+                "data": {
+                    "message": f"WebSocket error: {str(e)}",
+                    "timestamp": datetime.now(timezone.utc).isoformat()
+                }
+            }))
+        except:
+            pass
 
 @app.post("/api/execute")
 async def execute_order(request: dict):
