@@ -14,6 +14,9 @@ import {
   ActiveAlerts,
   ErrorDisplay,
   Footer,
+  PortfolioAnalysis,
+  RiskAdjustedArbitrage,
+  AdvancedAnalytics,
   MarketData,
   ChartDataPoint,
   Alert,
@@ -260,6 +263,7 @@ export default function Home() {
             <TabsTrigger value="alerts">Alert Center</TabsTrigger>
             <TabsTrigger value="orderbooks">Order Books</TabsTrigger>
             <TabsTrigger value="analytics">Analytics</TabsTrigger>
+            <TabsTrigger value="portfolio">Portfolio & Risk</TabsTrigger>
           </TabsList>
 
           {/* Market Overview Tab */}
@@ -292,6 +296,24 @@ export default function Home() {
           {/* Analytics Tab */}
           <TabsContent value="analytics" className="space-y-4">
             <Analytics marketData={marketData} />
+          </TabsContent>
+
+          {/* Portfolio & Risk Tab */}
+          <TabsContent value="portfolio" className="space-y-6">
+            <PortfolioAnalysis />
+            <AdvancedAnalytics />
+            <RiskAdjustedArbitrage 
+              marketData={marketData}
+              riskMetrics={{
+                var95: 0,
+                sharpeRatio: 0,
+                maxDrawdown: 0,
+                volatility: 0,
+                correlation: 0.85,
+                beta: 1.0,
+                sortinoRatio: 0,
+              }}
+            />
           </TabsContent>
         </Tabs>
 

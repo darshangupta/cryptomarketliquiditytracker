@@ -91,3 +91,46 @@ export interface AlertSettings {
   priceChangeThreshold: number;
   arbitrageMinProfit: number;
 }
+
+// Portfolio Analysis Types
+export interface PortfolioPosition {
+  asset: string;
+  size: number;
+  avgPrice: number;
+  currentValue: number;
+  pnl: number;
+  pnlPercent: number;
+  unrealizedGains: number;
+  costBasis: number;
+}
+
+export interface TradeImpact {
+  newSize: number;
+  newAvgPrice: number;
+  newValue: number;
+  pnl: number;
+  pnlPercent: number;
+  positionChange: number;
+  cost: number;
+  proceeds: number;
+  impactOnPortfolio: number;
+}
+
+export interface RiskMetrics {
+  var95: number; // Value at Risk (95% confidence)
+  sharpeRatio: number;
+  maxDrawdown: number;
+  volatility: number;
+  correlation: number;
+  beta: number;
+  sortinoRatio: number;
+}
+
+export interface PortfolioSummary {
+  totalValue: number;
+  totalCost: number;
+  totalPnl: number;
+  totalPnlPercent: number;
+  allocation: { [asset: string]: number }; // Percentage allocation
+  riskScore: number; // 0-100 risk score
+}

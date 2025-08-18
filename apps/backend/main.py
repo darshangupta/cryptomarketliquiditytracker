@@ -14,7 +14,10 @@ from ingest.kraken import KrakenAdapter
 from ingest.normalize import OrderBook
 from metrics.compute import MetricsComputer
 from metrics.sor import SmartOrderRouter
+from metrics.arbitrage import ArbitrageDetector
+from metrics.analytics import PortfolioAnalytics
 from state.buffers import OrderBookBuffer
+from state.portfolio import PortfolioSimulator
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -38,6 +41,9 @@ class AppState:
         self.order_book_buffer = OrderBookBuffer(max_size=1000)
         self.metrics_computer = MetricsComputer()
         self.sor_router = SmartOrderRouter()
+        self.arbitrage_detector = ArbitrageDetector()
+        self.portfolio_simulator = PortfolioSimulator()
+        self.portfolio_analytics = PortfolioAnalytics(self.portfolio_simulator)
         self.status = "warming"
         self.last_heartbeat = datetime.now(timezone.utc)
         self.venue_status = {"binance": False, "kraken": False}
@@ -50,6 +56,8 @@ class AppState:
         self.ingestion_task: Optional[asyncio.Task] = None
         self.metrics_task: Optional[asyncio.Task] = None
         self.heartbeat_task: Optional[asyncio.Task] = None
+        self.arbitrage_task: Optional[asyncio.Task] = None
+        self.analytics_task: Optional[asyncio.Task] = None
     
     def on_binance_update(self, order_book: OrderBook):
         """Callback when Binance order book updates"""
@@ -78,6 +86,8 @@ async def startup_event():
     app_state.ingestion_task = asyncio.create_task(run_exchange_ingestion())
     app_state.metrics_task = asyncio.create_task(run_metrics_computation())
     app_state.heartbeat_task = asyncio.create_task(run_heartbeat())
+    app_state.arbitrage_task = asyncio.create_task(run_arbitrage_detection())
+    app_state.analytics_task = asyncio.create_task(run_analytics_computation())
     
     logger.info("✅ Startup complete")
 
@@ -92,6 +102,10 @@ async def shutdown_event():
         app_state.metrics_task.cancel()
     if app_state.heartbeat_task:
         app_state.heartbeat_task.cancel()
+    if app_state.arbitrage_task:
+        app_state.arbitrage_task.cancel()
+    if app_state.analytics_task:
+        app_state.analytics_task.cancel()
     
     # Close all WebSocket connections
     for websocket in app_state.websocket_connections.copy():
@@ -178,6 +192,67 @@ async def run_metrics_computation():
         except Exception as e:
             logger.error(f"Metrics computation failed: {e}")
             await asyncio.sleep(1)
+
+async def run_arbitrage_detection():
+    """Run arbitrage detection at fixed intervals"""
+    while True:
+        try:
+            await asyncio.sleep(5.0)  # Check every 5 seconds
+            
+            if app_state.status != "live":
+                continue
+            
+            # Get latest order books for all symbols
+            binance_books = {}
+            kraken_books = {}
+            
+            # For now, we only have BTC data, but this structure supports multi-asset
+            binance_book = app_state.binance_adapter.get_latest_book()
+            kraken_book = app_state.kraken_adapter.get_latest_book()
+            
+            if binance_book and kraken_book:
+                binance_books["BTC-USD"] = binance_book
+                kraken_books["BTC-USD"] = kraken_book
+                
+                # Detect arbitrage opportunities
+                opportunities = app_state.arbitrage_detector.detect_opportunities(
+                    binance_books, kraken_books
+                )
+                
+                # Add opportunities to portfolio simulator
+                for opp in opportunities:
+                    app_state.portfolio_simulator.add_arbitrage_opportunity(opp)
+                
+                if opportunities:
+                    logger.info(f"🔍 Detected {len(opportunities)} arbitrage opportunities")
+                    
+                    # Auto-execute profitable opportunities
+                    await auto_execute_arbitrage(opportunities)
+                
+        except Exception as e:
+            logger.error(f"Arbitrage detection failed: {e}")
+            await asyncio.sleep(1)
+
+async def auto_execute_arbitrage(opportunities):
+    """Automatically execute profitable arbitrage opportunities"""
+    try:
+        for opp in opportunities:
+            if opp.is_profitable(Config.MIN_PROFIT_THRESHOLD_BPS):
+                # Calculate trade size (use 10% of available cash or max trade size, whichever is smaller)
+                available_cash = float(app_state.portfolio_simulator.cash_usd)
+                trade_size_usd = min(available_cash * 0.1, float(opp.max_trade_size))
+                
+                if trade_size_usd >= 100:  # Minimum $100 trade
+                    logger.info(f"🚀 Auto-executing arbitrage: {opp.symbol} ${trade_size_usd:.2f}")
+                    
+                    trade = app_state.portfolio_simulator.execute_arbitrage(opp, trade_size_usd)
+                    if trade:
+                        logger.info(f"✅ Arbitrage executed successfully: {trade.id}")
+                    else:
+                        logger.warning(f"❌ Arbitrage execution failed for {opp.symbol}")
+                        
+    except Exception as e:
+        logger.error(f"Auto-execute arbitrage failed: {e}")
 
 async def run_heartbeat():
     """Send heartbeat every 5 seconds"""
@@ -413,6 +488,331 @@ async def health_check():
         "system_status": app_state.status,
         "venue_status": app_state.venue_status
     }
+
+@app.get("/api/portfolio/summary")
+async def get_portfolio_summary():
+    """Get current portfolio summary"""
+    try:
+        return app_state.portfolio_simulator.get_portfolio_summary()
+    except Exception as e:
+        logger.error(f"Failed to get portfolio summary: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+@app.get("/api/portfolio/positions")
+async def get_portfolio_positions():
+    """Get all portfolio positions"""
+    try:
+        summary = app_state.portfolio_simulator.get_portfolio_summary()
+        return {
+            "timestamp": summary["timestamp"],
+            "positions": summary["positions"]
+        }
+    except Exception as e:
+        logger.error(f"Failed to get portfolio positions: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+@app.get("/api/portfolio/trades")
+async def get_portfolio_trades(limit: int = 50):
+    """Get recent portfolio trades"""
+    try:
+        trades = app_state.portfolio_simulator.trades[-limit:] if app_state.portfolio_simulator.trades else []
+        return {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "trades": [
+                {
+                    "id": trade.id,
+                    "symbol": trade.symbol,
+                    "side": trade.side,
+                    "quantity": float(trade.quantity),
+                    "price_usd": float(trade.price_usd),
+                    "total_usd": float(trade.total_usd),
+                    "venue": trade.venue,
+                    "timestamp": trade.timestamp.isoformat(),
+                    "fees_usd": float(trade.fees_usd),
+                    "arbitrage_profit_bps": float(trade.arbitrage_profit_bps) if trade.arbitrage_profit_bps else None
+                }
+                for trade in trades
+            ]
+        }
+    except Exception as e:
+        logger.error(f"Failed to get portfolio trades: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+@app.post("/api/portfolio/reset")
+async def reset_portfolio():
+    """Reset portfolio to initial state"""
+    try:
+        app_state.portfolio_simulator.reset_portfolio()
+        return {
+            "message": "Portfolio reset successfully",
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Failed to reset portfolio: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+@app.get("/api/arbitrage/opportunities")
+async def get_arbitrage_opportunities(symbol: Optional[str] = None, limit: int = 20):
+    """Get current arbitrage opportunities"""
+    try:
+        if symbol:
+            opportunities = app_state.portfolio_simulator.get_arbitrage_opportunities(symbol)
+        else:
+            opportunities = app_state.arbitrage_detector.get_best_opportunities(limit)
+        
+        return {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "opportunities": [
+                {
+                    "symbol": opp.symbol,
+                    "buy_venue": opp.buy_venue,
+                    "sell_venue": opp.sell_venue,
+                    "buy_price": float(opp.buy_price),
+                    "sell_price": float(opp.sell_price),
+                    "spread_bps": float(opp.spread_bps),
+                    "estimated_profit_usd": float(opp.estimated_profit_usd),
+                    "max_trade_size": float(opp.max_trade_size),
+                    "confidence_score": opp.confidence_score,
+                    "timestamp": opp.timestamp.isoformat(),
+                    "expires_at": opp.expires_at.isoformat()
+                }
+                for opp in opportunities
+            ]
+        }
+    except Exception as e:
+        logger.error(f"Failed to get arbitrage opportunities: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+@app.get("/api/arbitrage/summary")
+async def get_arbitrage_summary():
+    """Get arbitrage detection summary"""
+    try:
+        return app_state.arbitrage_detector.get_opportunities_summary()
+    except Exception as e:
+        logger.error(f"Failed to get arbitrage summary: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+@app.post("/api/arbitrage/execute")
+async def execute_arbitrage_manual(request: dict):
+    """Manually execute arbitrage opportunity"""
+    try:
+        symbol = request.get("symbol")
+        trade_size_usd = request.get("trade_size_usd")
+        
+        if not symbol or not trade_size_usd:
+            raise HTTPException(status_code=400, detail="Missing symbol or trade_size_usd")
+        
+        # Find the best opportunity for this symbol
+        opportunities = app_state.portfolio_simulator.get_arbitrage_opportunities(symbol)
+        if not opportunities:
+            raise HTTPException(status_code=404, detail="No arbitrage opportunities found for symbol")
+        
+        best_opportunity = opportunities[0]  # Get the best one
+        
+        # Execute the arbitrage
+        trade = app_state.portfolio_simulator.execute_arbitrage(best_opportunity, trade_size_usd)
+        
+        if trade:
+            return {
+                "message": "Arbitrage executed successfully",
+                "trade_id": trade.id,
+                "symbol": trade.symbol,
+                "profit_bps": float(trade.arbitrage_profit_bps) if trade.arbitrage_profit_bps else None,
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            }
+        else:
+            raise HTTPException(status_code=400, detail="Failed to execute arbitrage")
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to execute arbitrage: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+@app.get("/api/assets/status")
+async def get_assets_status():
+    """Get status of all configured assets"""
+    try:
+        assets_status = {}
+        
+        for symbol in Config.SYMBOLS:
+            # Get latest order books for this symbol
+            binance_book = app_state.binance_adapter.get_latest_book() if symbol == "BTC-USD" else None
+            kraken_book = app_state.kraken_adapter.get_latest_book() if symbol == "BTC-USD" else None
+            
+            if binance_book and kraken_book:
+                # Calculate cross-exchange metrics
+                binance_mid = binance_book.mid_price
+                kraken_mid = kraken_book.mid_price
+                
+                if binance_mid and kraken_mid:
+                    spread = abs(binance_mid - kraken_mid)
+                    spread_bps = (spread / min(binance_mid, kraken_mid)) * 10000
+                    
+                    assets_status[symbol] = {
+                        "status": "active",
+                        "binance_mid": binance_mid,
+                        "kraken_mid": kraken_mid,
+                        "cross_exchange_spread_bps": spread_bps,
+                        "last_update": datetime.now(timezone.utc).isoformat()
+                    }
+                else:
+                    assets_status[symbol] = {
+                        "status": "no_data",
+                        "last_update": datetime.now(timezone.utc).isoformat()
+                    }
+            else:
+                assets_status[symbol] = {
+                    "status": "no_data",
+                    "last_update": datetime.now(timezone.utc).isoformat()
+                }
+        
+        return {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "assets": assets_status
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to get assets status: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+async def run_analytics_computation():
+    """Run portfolio analytics computation at fixed intervals"""
+    while True:
+        try:
+            await asyncio.sleep(Config.PERFORMANCE_METRICS_INTERVAL)  # Update every 5 minutes
+            
+            if app_state.status != "live":
+                continue
+            
+            # Calculate all analytics metrics
+            analytics_data = app_state.portfolio_analytics.calculate_all_metrics()
+            
+            if analytics_data:
+                logger.info(f"📊 Analytics computed: {len(analytics_data)} metrics calculated")
+                
+                # Broadcast analytics to WebSocket clients
+                await broadcast_analytics(analytics_data)
+                
+        except Exception as e:
+            logger.error(f"Analytics computation failed: {e}")
+            await asyncio.sleep(60)  # Wait 1 minute on error
+
+async def broadcast_analytics(analytics_data: dict):
+    """Broadcast analytics data to all connected WebSocket clients"""
+    try:
+        analytics_frame = {
+            "type": "analytics_update",
+            "data": analytics_data
+        }
+        await broadcast_frame(analytics_frame)
+    except Exception as e:
+        logger.error(f"Failed to broadcast analytics: {e}")
+
+@app.get("/api/analytics/performance")
+async def get_performance_analytics():
+    """Get comprehensive performance analytics"""
+    try:
+        analytics_data = app_state.portfolio_analytics.calculate_all_metrics()
+        return analytics_data
+    except Exception as e:
+        logger.error(f"Failed to get performance analytics: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+@app.get("/api/analytics/performance/summary")
+async def get_performance_summary():
+    """Get performance summary metrics"""
+    try:
+        analytics_data = app_state.portfolio_analytics.calculate_all_metrics()
+        
+        # Extract key performance metrics
+        performance = analytics_data.get("performance", {})
+        risk = analytics_data.get("risk", {})
+        
+        return {
+            "timestamp": analytics_data.get("timestamp"),
+            "key_metrics": {
+                "total_return_pct": performance.get("total_return", 0) * 100,
+                "annualized_return_pct": performance.get("annualized_return", 0) * 100,
+                "sharpe_ratio": performance.get("sharpe_ratio", 0),
+                "max_drawdown_pct": performance.get("max_drawdown", 0) * 100,
+                "win_rate_pct": performance.get("win_rate", 0),
+                "volatility_pct": performance.get("volatility", 0) * 100
+            },
+            "risk_metrics": {
+                "var_95_pct": risk.get("var_95", 0) * 100,
+                "var_99_pct": risk.get("var_99", 0) * 100,
+                "ulcer_index": risk.get("ulcer_index", 0),
+                "gain_to_pain_ratio": risk.get("gain_to_pain_ratio", 0)
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to get performance summary: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+@app.get("/api/analytics/allocation")
+async def get_allocation_analytics():
+    """Get asset allocation and diversification analytics"""
+    try:
+        analytics_data = app_state.portfolio_analytics.calculate_all_metrics()
+        return {
+            "timestamp": analytics_data.get("timestamp"),
+            "allocation": analytics_data.get("allocation", {}),
+            "diversification": analytics_data.get("diversification", {})
+        }
+    except Exception as e:
+        logger.error(f"Failed to get allocation analytics: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+@app.get("/api/analytics/arbitrage")
+async def get_arbitrage_analytics():
+    """Get arbitrage-specific performance analytics"""
+    try:
+        analytics_data = app_state.portfolio_analytics.calculate_all_metrics()
+        return {
+            "timestamp": analytics_data.get("timestamp"),
+            "arbitrage": analytics_data.get("arbitrage", {})
+        }
+    except Exception as e:
+        logger.error(f"Failed to get arbitrage analytics: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+@app.get("/api/analytics/risk")
+async def get_risk_analytics():
+    """Get comprehensive risk analytics"""
+    try:
+        analytics_data = app_state.portfolio_analytics.calculate_all_metrics()
+        return {
+            "timestamp": analytics_data.get("timestamp"),
+            "risk": analytics_data.get("risk", {}),
+            "performance": {
+                "volatility": analytics_data.get("performance", {}).get("volatility", 0),
+                "max_drawdown": analytics_data.get("performance", {}).get("max_drawdown", 0)
+            }
+        }
+    except Exception as e:
+        logger.error(f"Failed to get risk analytics: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+@app.get("/api/analytics/historical")
+async def get_historical_analytics(days: int = 30):
+    """Get historical analytics for specified time period"""
+    try:
+        # For now, return current analytics
+        # In future, this would query historical data from database
+        analytics_data = app_state.portfolio_analytics.calculate_all_metrics()
+        
+        return {
+            "timestamp": analytics_data.get("timestamp"),
+            "period_days": days,
+            "current_metrics": analytics_data,
+            "note": "Historical data storage not yet implemented - showing current metrics"
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to get historical analytics: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 if __name__ == "__main__":
     uvicorn.run(
